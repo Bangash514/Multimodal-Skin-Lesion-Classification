@@ -1,0 +1,176 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Nov 18 06:12:10 2024
+
+@author: Administrator
+"""
+#EffieiecneNetB4
+import os
+import pandas as pd
+import numpy as np
+from sklearn.preprocessing import StandardScaler
+from tensorflow.keras.applications import EfficientNetB4
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras.layers import Dense, GlobalAveragePooling2D, Input, Concatenate, Dropout
+from tensorflow.keras.models import Model
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+import matplotlib.pyplot as plt
+
+# Paths
+metadata_path = r'C:/Users/Administrator/Downloads/ExperimentsforImages/Multi_Modal_Datasets/HAM10000_metadata.csv'
+base_dir_1 = r'C:/Users/Administrator/Downloads/ExperimentsforImages/Multi_Modal_Datasets/HAM10000_images_part_1'
+base_dir_2 = r'C:/Users/Administrator/Downloads/ExperimentsforImages/Multi_Modal_Datasets/HAM10000_images_part_2'
+
+# Load and preprocess metadata
+metadata = pd.read_csv(metadata_path)
+metadata_features = metadata[['age', 'sex', 'localization']]
+metadata_features = pd.get_dummies(metadata_features)  # One-hot encoding for categorical features
+metadata_features['age'] = metadata_features['age'].fillna(metadata_features['age'].mean())  # Fill missing values
+scaler = StandardScaler()
+metadata_features = scaler.fit_transform(metadata_features)
+
+# Print shape for verification
+print("Metadata features shape:", metadata_features.shape)
+
+# Data augmentation for images
+datagen = ImageDataGenerator(
+    rescale=1.0 / 255,
+    validation_split=0.2,
+    rotation_range=30,
+    width_shift_range=0.2,
+    height_shift_range=0.2,
+    shear_range=0.15,
+    zoom_range=0.2,
+    brightness_range=[0.8, 1.2],
+    horizontal_flip=True,
+    fill_mode='nearest'
+)
+
+# Training image generators
+train_image_generator_1 = datagen.flow_from_directory(
+    base_dir_1,
+    target_size=(128, 128),
+    batch_size=8,
+    class_mode='categorical',
+    subset='training',
+    shuffle=True
+)
+
+train_image_generator_2 = datagen.flow_from_directory(
+    base_dir_2,
+    target_size=(128, 128),
+    batch_size=8,
+    class_mode='categorical',
+    subset='training',
+    shuffle=True
+)
+
+# Validation image generators
+validation_image_generator_1 = datagen.flow_from_directory(
+    base_dir_1,
+    target_size=(128, 128),
+    batch_size=8,
+    class_mode='categorical',
+    subset='validation',
+    shuffle=True
+)
+
+validation_image_generator_2 = datagen.flow_from_directory(
+    base_dir_2,
+    target_size=(128, 128),
+    batch_size=8,
+    class_mode='categorical',
+    subset='validation',
+    shuffle=True
+)
+
+# Combine image and metadata generators
+def combine_generators(image_gen1, image_gen2, metadata_features):
+    while True:
+        # Get batches of images from both generators
+        image_batch1, label_batch1 = next(image_gen1)
+        image_batch2, label_batch2 = next(image_gen2)
+        
+        # Combine images and labels
+        images = np.concatenate([image_batch1, image_batch2])
+        labels = np.concatenate([label_batch1, label_batch2])
+        
+        # Dynamically adjust metadata batch to match image batch size
+        metadata_batch_size = images.shape[0]
+        metadata_batch = metadata_features[:metadata_batch_size]
+
+        yield [images, metadata_batch], labels
+
+# Create training and validation generators
+train_gen = combine_generators(train_image_generator_1, train_image_generator_2, metadata_features)
+val_gen = combine_generators(validation_image_generator_1, validation_image_generator_2, metadata_features)
+
+# EfficientNetB4 model
+base_model = EfficientNetB4(weights='imagenet', include_top=False, input_shape=(128, 128, 3))
+
+# Freeze layers for transfer learning
+for layer in base_model.layers:
+    layer.trainable = False
+
+# Add custom layers for image branch
+x = base_model.output
+x = GlobalAveragePooling2D()(x)
+
+# Metadata input branch
+metadata_input = Input(shape=(metadata_features.shape[1],))
+y = Dense(32, activation='relu')(metadata_input)
+y = Dense(16, activation='relu')(y)
+
+# Combine image and metadata branches
+combined = Concatenate()([x, y])
+z = Dense(64, activation='relu')(combined)
+z = Dropout(0.5)(z)
+output = Dense(7, activation='softmax')(z)
+
+# Final model
+model = Model(inputs=[base_model.input, metadata_input], outputs=output)
+
+# Compile the model
+model.compile(optimizer=Adam(learning_rate=1e-4), loss='categorical_crossentropy', metrics=['accuracy'])
+
+# Callbacks
+early_stopping = EarlyStopping(monitor='val_accuracy', patience=5, restore_best_weights=True)
+lr_scheduler = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=3, min_lr=1e-7)
+
+# Train the model
+history = model.fit(
+    train_gen,
+    validation_data=val_gen,
+    epochs=10,  # Train for 10 epochs
+    steps_per_epoch=(train_image_generator_1.samples + train_image_generator_2.samples) // 8,
+    validation_steps=(validation_image_generator_1.samples + validation_image_generator_2.samples) // 8,
+    callbacks=[early_stopping, lr_scheduler]
+)
+
+# Plot training and validation metrics
+# Accuracy Plot
+plt.figure(figsize=(12, 6))
+plt.plot(history.history['accuracy'], label='Training Accuracy')
+plt.plot(history.history['val_accuracy'], label='Validation Accuracy')
+plt.xlabel('Epoch')
+plt.ylabel('Accuracy')
+plt.title('Training and Validation Accuracy')
+plt.legend()
+plt.show()
+
+# Loss Plot
+plt.figure(figsize=(12, 6))
+plt.plot(history.history['loss'], label='Training Loss')
+plt.plot(history.history['val_loss'], label='Validation Loss')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.title('Training and Validation Loss')
+plt.legend()
+plt.show()
+
+# Final metrics
+print("Final Training Accuracy:", history.history['accuracy'][-1])
+print("Final Validation Accuracy:", history.history['val_accuracy'][-1])
+print("Final Training Loss:", history.history['loss'][-1])
+print("Final Validation Loss:", history.history['val_loss'][-1])
