@@ -1,0 +1,179 @@
+#Bangash PhD Scholar
+
+# Import necessary libraries
+import os
+import pandas as pd
+import numpy as np
+import tensorflow as tf
+from tensorflow.keras.applications import InceptionResNetV2
+from tensorflow.keras.layers import Input, Dense, GlobalAveragePooling2D, Concatenate, Dropout
+from tensorflow.keras.models import Model
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from sklearn.metrics import precision_score, recall_score, f1_score
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+import matplotlib.pyplot as plt
+
+# Paths
+metadata_path = r'C:/Users/Administrator/Downloads/ExperimentsforImages/Multi_Modal_Datasets/HAM10000_metadata.csv'
+base_dir_1 = r'C:/Users/Administrator/Downloads/ExperimentsforImages/Multi_Modal_Datasets/HAM10000_images_part_1'
+base_dir_2 = r'C:/Users/Administrator/Downloads/ExperimentsforImages/Multi_Modal_Datasets/HAM10000_images_part_2'
+
+# Load metadata and preprocess labels
+metadata = pd.read_csv(metadata_path)
+metadata_labels = metadata['dx']
+
+# Encode labels and convert to one-hot encoding
+label_encoder = LabelEncoder()
+metadata_labels = label_encoder.fit_transform(metadata_labels)
+num_classes = len(np.unique(metadata_labels))
+metadata_labels = tf.keras.utils.to_categorical(metadata_labels, num_classes=num_classes)
+
+# Preprocess metadata features
+metadata_features = metadata[['age', 'sex', 'localization']]
+metadata_features = pd.get_dummies(metadata_features)
+scaler = StandardScaler()
+metadata_features = scaler.fit_transform(metadata_features)
+
+# Data augmentation for images (simplified for performance)
+datagen = ImageDataGenerator(
+    rescale=1.0 / 255,
+    validation_split=0.2,
+    rotation_range=10,  # Reduced for better performance
+    width_shift_range=0.1,
+    height_shift_range=0.1,
+    zoom_range=0.1,
+    horizontal_flip=True,
+    fill_mode='nearest'
+)
+
+# ImageDataGenerators for both directories
+train_image_generator_1 = datagen.flow_from_directory(
+    base_dir_1,
+    target_size=(150, 150),  # Increased size
+    batch_size=4,  # Keep batch size manageable
+    class_mode='categorical',
+    subset='training'
+)
+
+train_image_generator_2 = datagen.flow_from_directory(
+    base_dir_2,
+    target_size=(150, 150),  # Increased size
+    batch_size=4,
+    class_mode='categorical',
+    subset='training'
+)
+
+validation_image_generator_1 = datagen.flow_from_directory(
+    base_dir_1,
+    target_size=(150, 150),  # Increased size
+    batch_size=4,
+    class_mode='categorical',
+    subset='validation'
+)
+
+validation_image_generator_2 = datagen.flow_from_directory(
+    base_dir_2,
+    target_size=(150, 150),  # Increased size
+    batch_size=4,
+    class_mode='categorical',
+    subset='validation'
+)
+
+# Combine generators for both directories
+def combine_generators(image_gen1, image_gen2, metadata, labels):
+    while True:
+        image_batch1, label_batch1 = next(image_gen1)
+        image_batch2, label_batch2 = next(image_gen2)
+
+        # Combine images and labels from both generators
+        images = np.concatenate([image_batch1, image_batch2])
+        labels = np.concatenate([label_batch1, label_batch2])
+
+        # Match metadata to batch size dynamically
+        metadata_batch_size = images.shape[0]
+        metadata_batch = metadata[:metadata_batch_size]
+
+        yield [images, metadata_batch], labels
+
+# Create training and validation generators
+train_gen = combine_generators(
+    train_image_generator_1, train_image_generator_2, 
+    metadata_features[:train_image_generator_1.samples + train_image_generator_2.samples], 
+    metadata_labels[:train_image_generator_1.samples + train_image_generator_2.samples]
+)
+
+val_gen = combine_generators(
+    validation_image_generator_1, validation_image_generator_2, 
+    metadata_features[train_image_generator_1.samples + train_image_generator_2.samples:], 
+    metadata_labels[train_image_generator_1.samples + train_image_generator_2.samples:]
+)
+
+# InceptionResNetV2 base model for image processing
+image_input = Input(shape=(150, 150, 3))  # Increased input size
+base_model = InceptionResNetV2(weights='imagenet', include_top=False, input_tensor=image_input)
+
+x = GlobalAveragePooling2D()(base_model.output)
+x = Dense(64, activation='relu')(x)
+x = Dropout(0.5)(x)
+
+# Metadata processing branch
+metadata_input = Input(shape=(metadata_features.shape[1],))
+y = Dense(32, activation='relu')(metadata_input)
+y = Dropout(0.5)(y)
+
+# Combine branches
+combined = Concatenate()([x, y])
+z = Dense(64, activation='relu')(combined)
+z = Dropout(0.5)(z)
+output = Dense(num_classes, activation='softmax')(z)
+
+# Build and compile the model
+model = Model(inputs=[image_input, metadata_input], outputs=output)
+model.compile(optimizer=Adam(learning_rate=1e-4), loss='categorical_crossentropy', metrics=['accuracy'])
+
+# Training the model
+history = model.fit(
+    train_gen,
+    steps_per_epoch=train_image_generator_1.samples // 4 + train_image_generator_2.samples // 4,
+    epochs=10,
+    validation_data=val_gen,
+    validation_steps=validation_image_generator_1.samples // 4 + validation_image_generator_2.samples // 4,
+    callbacks=[
+        tf.keras.callbacks.ModelCheckpoint('model_inceptionresnetv2.h5', save_best_only=True, monitor='val_accuracy'),
+        tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=5),
+        tf.keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=3)
+    ]
+)
+
+# Model Evaluation
+train_accuracy = history.history['accuracy'][-1]
+train_loss = history.history['loss'][-1]
+val_accuracy = history.history['val_accuracy'][-1]
+val_loss = history.history['val_loss'][-1]
+
+# Displaying the training and validation accuracy and loss
+print(f"Final Training Accuracy: {train_accuracy:.4f}")
+print(f"Final Training Loss: {train_loss:.4f}")
+print(f"Final Validation Accuracy: {val_accuracy:.4f}")
+print(f"Final Validation Loss: {val_loss:.4f}")
+
+# Predict on validation data
+val_predictions = model.predict(val_gen, steps=validation_image_generator_1.samples // 4 + validation_image_generator_2.samples // 4)
+
+# Convert one-hot to class labels for precision, recall, and F1 calculation
+val_true_labels = np.argmax(validation_image_generator_1.labels[:validation_image_generator_1.samples] + validation_image_generator_2.labels[:validation_image_generator_2.samples], axis=1)
+val_pred_labels = np.argmax(val_predictions, axis=1)
+
+# Calculate precision, recall, and F1-score
+precision = precision_score(val_true_labels, val_pred_labels, average='weighted')
+recall = recall_score(val_true_labels, val_pred_labels, average='weighted')
+f1 = f1_score(val_true_labels, val_pred_labels, average='weighted')
+
+# Display the results
+print(f"Precision: {precision:.4f}")
+print(f"Recall: {recall:.4f}")
+print(f"F1-Score: {f1:.4f}")
+
+# Save the model
+model.save('final_model_inceptionresnetv2.h5')
