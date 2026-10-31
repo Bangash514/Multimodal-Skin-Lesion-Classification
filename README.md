@@ -49,8 +49,6 @@ If you use or adapt this code, please give credit by citing this repository and 
 
 This code is released under the MIT licence (see `LICENSE`), which requires keeping the copyright notice.
 
-## References
-- Tschandl P., Rosendahl C., Kittler H., *The HAM10000 dataset, a large collection of multi-source dermatoscopic images of common pigmented skin lesions*, Scientific Data, 2018.
 
 ## Author
 BEN, Software Engineer. GitHub: [Bangash514](https://github.com/Bangash514)
